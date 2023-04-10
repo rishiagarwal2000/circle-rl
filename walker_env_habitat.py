@@ -6,7 +6,6 @@ import habitat_sim.physics as phy
 from habitat_sim.utils.common import quat_from_magnum, quat_to_magnum
 from scipy.spatial.transform import Rotation as R
 
-import cv2
 import magnum as mn
 import numpy as np
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -56,7 +55,7 @@ class WalkerEnvHabitat():
             motion_end=None,
             motion_stepper=0,
             fps=200, 
-            frameskip=4,
+            frameskip=1,
             urdf_path="CIRCLE_assets/subjects/1_agent.urdf", #"/Users/rishi/Documents/Academics/stanford/contextual-character-animation/bullet3/data/quadruped/quadruped.urdf" #"/Users/rishi/Documents/Academics/stanford/contextual-character-animation/bullet3/data/humanoid/nao.urdf" #"CIRCLE_assets/subjects/1_agent.urdf"
             ref_urdf_path="CIRCLE_assets/subjects/1.urdf" #"/Users/rishi/Documents/Academics/stanford/contextual-character-animation/bullet3/data/quadruped/quadruped.urdf" #"/Users/rishi/Documents/Academics/stanford/contextual-character-animation/bullet3/data/humanoid/nao.urdf" #"CIRCLE_assets/subjects/1_agent.urdf"
     ):
@@ -209,9 +208,6 @@ class WalkerEnvHabitat():
             # self.agent_model.add_joint_forces(action / 1000)
             self.sim.step_world(1.0 / self.fps)
 
-        # print(f"self.sim.data={self.sim.data}, qpos={self.sim.data.qpos}, qpos_shape={self.sim.data.qpos.shape}")
-        # self.do_simulation_with_pd(a, self.frame_skip)
-        
         height, posafter = np.array(self.agent_model.translation)[1:3]
 
         alive_bonus = 1.0
@@ -220,8 +216,8 @@ class WalkerEnvHabitat():
         reward -= 1e-3 * np.square(action).sum()
         terminated = False
         # terminated = not (height > self.init_height / 4 and height < 5 * self.init_height)
-        if height > 50 * self.init_height or np.max(self.agent_model.joint_velocities) > 5:
-            print(f"height={height}, init_height={self.init_height}, reward={reward}, terminated={terminated}, velocity={self.agent_model.joint_velocities}")
+        # if height > 50 * self.init_height or np.max(self.agent_model.joint_velocities) > 5:
+        #     print(f"height={height}, init_height={self.init_height}, reward={reward}, terminated={terminated}, velocity={self.agent_model.joint_velocities}")
 
         return self.get_observation(), reward, terminated, False, {}
         
@@ -241,12 +237,16 @@ class WalkerEnvHabitat():
     def reset(self):
         # self.motion_stepper = np.random.randint(0, len(self.motion.poses))
         new_pose, new_pose_T, new_root_translate, new_root_rotation = self.get_ref_pose(raw=False)
-        # self.agent_model.joint_positions = np.random.uniform(low=-0.0005, high=0.0005, size=len(self.agent_model.joint_positions))
-        # self.agent_model.joint_velocities = np.random.uniform(low=-0.005, high=0.005, size=len(self.agent_model.joint_velocities))
-        self.agent_model.rotation = global_correction_quat(mn.Vector3.z_axis(), mn.Vector3.x_axis())
+        # print(f"jointpos = {np.zeros(len(self.agent_model.joint_positions))}, jointvel = {np.random.uniform(low=-0.005, high=0.005, size=len(self.agent_model.joint_velocities))}")
+        joint_positions = np.zeros(len(self.agent_model.joint_positions))
+        joint_positions[3::4] = 1
+        self.agent_model.joint_positions = joint_positions
+        self.agent_model.joint_velocities = np.random.uniform(low=-0.005, high=0.005, size=len(self.agent_model.joint_velocities))
+        self.agent_model.rotation = global_correction_quat(mn.Vector3.z_axis(), -mn.Vector3.y_axis())
         self.init_height = 1.2
         self.agent_model.translation = mn.Vector3(0, self.init_height, 0)
         self.origin = self.agent_model.translation
+        print(self.agent_model.joint_positions, self.agent_model.joint_velocities, self.agent_model.joint_forces)
 
         new_pose, new_pose_T, new_root_translate, new_root_rotation = self.get_ref_pose()
         self.ref_model.joint_positions = new_pose
@@ -397,18 +397,36 @@ if __name__ == '__main__':
     env = WalkerEnvHabitat(sim_settings, bvh_path, motion_start=start, motion_end=end)
     o, info = env.reset()
     frames = [env.render()]
-    # dir_ = f'gifs-habitat-sim'
+    dir_ = f'gifs-habitat-sim'
     
-    # if not os.path.isdir(dir_):
-    #     os.mkdir(dir_)
+    if not os.path.isdir(dir_):
+        os.mkdir(dir_)
 
-    # path = f'{dir_}/test.gif'
-    # for _ in range(1):
-    #     a = np.random.rand(len(env.agent_model.joint_forces))
-    #     for _ in range(1):
-    #         o, r, terminated, info = env.step(a)
-    #     frames.append(env.render())
-    #     if terminated:
-    #         break
-    cv2.imwrite("gifs-habitat-sim/img.png", frames[0])
-    # imageio.mimsave(path, frames)
+    path = f'{dir_}/test2.gif'
+    for _ in range(100):
+        a = np.random.rand(len(env.agent_model.joint_forces))
+        for _ in range(1):
+            o, r, terminated, truncated, info = env.step(a)
+        frames.append(env.render())
+        if terminated:
+            break
+    
+    imageio.mimsave(path, frames)
+
+    o, info = env.reset()
+    frames = [env.render()]
+    dir_ = f'gifs-habitat-sim'
+    
+    if not os.path.isdir(dir_):
+        os.mkdir(dir_)
+
+    path = f'{dir_}/test3.gif'
+    for _ in range(100):
+        a = np.random.rand(len(env.agent_model.joint_forces))
+        for _ in range(1):
+            o, r, terminated, truncated, info = env.step(a)
+        frames.append(env.render())
+        if terminated:
+            break
+    # imageio.imwrite("gifs-habitat-sim/img.png", frames[0])
+    imageio.mimsave(path, frames)

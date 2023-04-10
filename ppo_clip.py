@@ -273,6 +273,7 @@ class PPO():
             if terminated or truncated or num_steps > self.args.max_ep_len:
                 imageio.mimsave(path, frames)
                 break
+        imageio.imwrite(f'{dir_}/episodes_{self.episodes}.png', frames[0])
         return path
 
     def print_time(self, *args, **kwargs):
@@ -289,7 +290,7 @@ if __name__ == '__main__':
     args_dict = json.load(open("config/walker.json", "r"))
     args = Dict2Class(args_dict)
 
-    wandb.init(project=args.project_name, name=args.exp_name, reinit=False, config=args_dict)
+    wandb.init(project=args.project_name, name=args.exp_name, reinit=False, config=args_dict, mode="disabled")
 
     wandb.define_metric("pi/step")
     wandb.define_metric("pi/*", step_metric="pi/step")
@@ -314,4 +315,5 @@ if __name__ == '__main__':
         return WalkerEnvHabitat(sim_settings, bvh_path)
     
     ppo = PPO(env_fn, args, ac_kwargs=dict(hidden_sizes=[args.hid]*args.l))
-    ppo.train()
+    ppo.save_gif()
+    # ppo.train()

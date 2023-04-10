@@ -1,0 +1,40 @@
+{
+  "stages": {
+    "paths": {
+      ".glb": [
+        "stages/*"
+      ]
+    },
+    "default_attributes": {
+      "shader_type": "pbr",
+      "up": [
+        0,
+        1,
+        0
+      ],
+      "front": [
+        0,
+        0,
+        -1
+      ],
+      "origin": [
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  "objects": {},
+  "light_setups": {
+    "default_attributes": {
+      "positive_intensity_scale": 2.5,
+      "negative_intensity_scale": 0.1
+    },
+    "paths": {
+      ".json": [
+        "configs/lighting"
+      ]
+    }
+  },
+  "scene_instances": {}
+}

@@ -49,14 +49,14 @@ class WalkerEnvHabitat():
             self, 
             sim_settings, 
             bvh_path, 
-            rotation_offset=mn.Quaternion(), 
-            translate_offset=mn.Vector3([0, 0, 0]), 
+            # rotation_offset=mn.Quaternion(), 
+            # translate_offset=mn.Vector3([0, 0, 0]), 
             motion_start=None, 
             motion_end=None,
             motion_stepper=0,
             fps=200, 
-            frameskip=1,
-            urdf_path="CIRCLE_assets/subjects/1_agent.urdf", #"/Users/rishi/Documents/Academics/stanford/contextual-character-animation/bullet3/data/quadruped/quadruped.urdf" #"/Users/rishi/Documents/Academics/stanford/contextual-character-animation/bullet3/data/humanoid/nao.urdf" #"CIRCLE_assets/subjects/1_agent.urdf"
+            frameskip=4,
+            urdf_path="human.urdf", #"/Users/rishi/Documents/Academics/stanford/contextual-character-animation/bullet3/data/quadruped/quadruped.urdf" #"/Users/rishi/Documents/Academics/stanford/contextual-character-animation/bullet3/data/humanoid/nao.urdf" #"CIRCLE_assets/subjects/1_agent.urdf"
             ref_urdf_path="CIRCLE_assets/subjects/1.urdf" #"/Users/rishi/Documents/Academics/stanford/contextual-character-animation/bullet3/data/quadruped/quadruped.urdf" #"/Users/rishi/Documents/Academics/stanford/contextual-character-animation/bullet3/data/humanoid/nao.urdf" #"CIRCLE_assets/subjects/1_agent.urdf"
     ):
         self.sim_settings = sim_settings
@@ -64,8 +64,8 @@ class WalkerEnvHabitat():
         self.ref_urdf_path = ref_urdf_path
         self.motion_type = phy.MotionType.DYNAMIC
 
-        self.rotation_offset: Optional[mn.Quaternion] = rotation_offset
-        self.translate_offset: Optional[mn.Vector3] = translate_offset
+        # self.rotation_offset: Optional[mn.Quaternion] = rotation_offset
+        # self.translate_offset: Optional[mn.Vector3] = translate_offset
         self.bvh_path = bvh_path
         self.motion_stepper = motion_stepper
         self.motion_start: int = motion_start
@@ -73,15 +73,21 @@ class WalkerEnvHabitat():
 
         self.fps = fps
         self.frameskip = frameskip
-
-        self.final_rotation_correction = global_correction_quat(mn.Vector3.z_axis(), mn.Vector3.x_axis())
+        # print("starting reconfiguring")
+        # self.final_rotation_correction = global_correction_quat(mn.Vector3.z_axis(), mn.Vector3.x_axis())
         self._reconfigure_sim()
         self._load_motion()
+        # print("loaded motion")
 
+        # print("getting art obj manager")
         self.art_obj_mgr = self.sim.get_articulated_object_manager()
+        self.agent_model = None
+        self.ref_model = None
+        # print("adding stage")
         self._add_stage()
-        self._add_agent_model()
-        self._add_ref_model()
+        # print("Added stage")
+        self.reset()
+        # print("Reset")
     
     def _reconfigure_sim(self):
         self.cfg = make_cfg(self.sim_settings)
@@ -92,9 +98,9 @@ class WalkerEnvHabitat():
             logger.info("Setting synthetic lighting override for stage.")
             self.cfg.sim_cfg.override_scene_light_defaults = True
             self.cfg.sim_cfg.scene_light_setup = habitat_sim.gfx.DEFAULT_LIGHTING_KEY
-
+        
         self.sim = habitat_sim.Simulator(self.cfg)
-
+        
         # post reconfigure
         self.active_scene_graph = self.sim.get_active_scene_graph()
        
@@ -166,11 +172,14 @@ class WalkerEnvHabitat():
         )
         assert self.stage.is_alive
         self.stage.motion_type = self.motion_type
-        self.stage.rotation = self.final_rotation_correction
+        self.stage.rotation = global_correction_quat(mn.Vector3.z_axis(), mn.Vector3.x_axis()) #self.final_rotation_correction
         self.stage.translation = mn.Vector3(0, 0, 0)
 
     def _add_agent_model(self):
-        # self._hide_existing_model()
+        
+        if self.agent_model:
+            self.art_obj_mgr.remove_object_by_handle(self.agent_model.handle)
+            self.agent_model = None
 
         self.agent_model = self.art_obj_mgr.add_articulated_object_from_urdf(
             filepath=self.urdf_path,
@@ -182,6 +191,10 @@ class WalkerEnvHabitat():
         self.agent_model.motion_type = self.motion_type
 
     def _add_ref_model(self):
+        
+        if self.ref_model:
+            self.art_obj_mgr.remove_object_by_handle(self.ref_model.handle)
+            self.ref_model = None
 
         self.ref_model = self.art_obj_mgr.add_articulated_object_from_urdf(
             filepath=self.ref_urdf_path,
@@ -192,11 +205,6 @@ class WalkerEnvHabitat():
         # change motion_type to KINEMATIC
         self.ref_model.motion_type = phy.MotionType.KINEMATIC
 
-    def _hide_existing_model(self):
-        if self.agent_model:
-            self.art_obj_mgr.remove_object_by_handle(self.agent_model.handle)
-            self.model = None
-
     def step(self, action):
         is_done = False
         # self.motion_stepper = (self.motion_stepper + 1) % len(self.motion.poses)
@@ -205,7 +213,7 @@ class WalkerEnvHabitat():
         posbefore = np.array(self.agent_model.translation)[2]
 
         for _ in range(self.frameskip):
-            # self.agent_model.add_joint_forces(action / 1000)
+            self.agent_model.add_joint_forces(action)
             self.sim.step_world(1.0 / self.fps)
 
         height, posafter = np.array(self.agent_model.translation)[1:3]
@@ -214,10 +222,9 @@ class WalkerEnvHabitat():
         reward = (posafter - posbefore) * self.fps
         reward += alive_bonus
         reward -= 1e-3 * np.square(action).sum()
-        terminated = False
-        # terminated = not (height > self.init_height / 4 and height < 5 * self.init_height)
+        terminated = not (height > 0.9 and height < 5 * self.init_height) or (max(np.abs(self.agent_model.joint_positions[31]), np.abs(self.agent_model.joint_positions[40])) > 1)
         # if height > 50 * self.init_height or np.max(self.agent_model.joint_velocities) > 5:
-        #     print(f"height={height}, init_height={self.init_height}, reward={reward}, terminated={terminated}, velocity={self.agent_model.joint_velocities}")
+            # print(f"height={height}, init_height={self.init_height}, reward={reward}, terminated={terminated}, velocity={self.agent_model.joint_velocities}, maxVel={np.max(self.agent_model.joint_velocities)}, action={action}, maxAction={np.max(action)}")
 
         return self.get_observation(), reward, terminated, False, {}
         
@@ -236,17 +243,23 @@ class WalkerEnvHabitat():
     
     def reset(self):
         # self.motion_stepper = np.random.randint(0, len(self.motion.poses))
+        self._add_agent_model()
+        self._add_ref_model()
         new_pose, new_pose_T, new_root_translate, new_root_rotation = self.get_ref_pose(raw=False)
         # print(f"jointpos = {np.zeros(len(self.agent_model.joint_positions))}, jointvel = {np.random.uniform(low=-0.005, high=0.005, size=len(self.agent_model.joint_velocities))}")
         joint_positions = np.zeros(len(self.agent_model.joint_positions))
-        joint_positions[3::4] = 1
+        # joint_positions[[31,40]] = -1
+        # uncomment the next line for circle.urdf
+        # joint_positions[3::4] = 1
         self.agent_model.joint_positions = joint_positions
         self.agent_model.joint_velocities = np.random.uniform(low=-0.005, high=0.005, size=len(self.agent_model.joint_velocities))
-        self.agent_model.rotation = global_correction_quat(mn.Vector3.z_axis(), -mn.Vector3.y_axis())
-        self.init_height = 1.2
+        # circle.urdf: global_correction_quat(mn.Vector3.z_axis(), -mn.Vector3.y_axis())
+        # human.urdf: global_correction_quat(mn.Vector3.z_axis(), mn.Vector3.x_axis())
+        self.agent_model.rotation = global_correction_quat(mn.Vector3.z_axis(), mn.Vector3.x_axis()) 
+        self.init_height = 1.1
         self.agent_model.translation = mn.Vector3(0, self.init_height, 0)
         self.origin = self.agent_model.translation
-        print(self.agent_model.joint_positions, self.agent_model.joint_velocities, self.agent_model.joint_forces)
+        # print("joint positions", self.agent_model.joint_positions, self.agent_model.joint_velocities, self.agent_model.joint_forces)
 
         new_pose, new_pose_T, new_root_translate, new_root_rotation = self.get_ref_pose()
         self.ref_model.joint_positions = new_pose
@@ -301,14 +314,14 @@ class WalkerEnvHabitat():
         if not raw:
             final_rotation_correction = (
                 global_correction_quat(mn.Vector3.y_axis(), mn.Vector3.x_axis())
-                * self.rotation_offset
+                * mn.Quaternion()
             )
 
         root_rotation = final_rotation_correction * mn.Quaternion.from_matrix(
             mn.Matrix3x3(root_T[0:3, 0:3])
         )
         root_translation = (
-            self.translate_offset
+            mn.Vector3(0,0,0)
             + final_rotation_correction.transform_vector(root_T[0:3, 3])
         )
 
@@ -410,23 +423,23 @@ if __name__ == '__main__':
         frames.append(env.render())
         if terminated:
             break
-    
+    imageio.imwrite("gifs-habitat-sim/img.png", frames[0])
     imageio.mimsave(path, frames)
 
-    o, info = env.reset()
-    frames = [env.render()]
-    dir_ = f'gifs-habitat-sim'
+    # o, info = env.reset()
+    # frames = [env.render()]
+    # dir_ = f'gifs-habitat-sim'
     
-    if not os.path.isdir(dir_):
-        os.mkdir(dir_)
+    # if not os.path.isdir(dir_):
+    #     os.mkdir(dir_)
 
-    path = f'{dir_}/test3.gif'
-    for _ in range(100):
-        a = np.random.rand(len(env.agent_model.joint_forces))
-        for _ in range(1):
-            o, r, terminated, truncated, info = env.step(a)
-        frames.append(env.render())
-        if terminated:
-            break
-    # imageio.imwrite("gifs-habitat-sim/img.png", frames[0])
-    imageio.mimsave(path, frames)
+    # path = f'{dir_}/test3.gif'
+    # for _ in range(100):
+    #     a = np.random.rand(len(env.agent_model.joint_forces))
+    #     for _ in range(1):
+    #         o, r, terminated, truncated, info = env.step(a)
+    #     frames.append(env.render())
+    #     if terminated:
+    #         break
+    # # imageio.imwrite("gifs-habitat-sim/img.png", frames[0])
+    # imageio.mimsave(path, frames)

@@ -1,6 +1,6 @@
 import time
 # import gymnasium as gym
-# from multiprocessing import Pool
+from multiprocessing import Pool
 import core
 import torch
 from torch.optim import Adam
@@ -12,13 +12,24 @@ import json
 import pathlib
 from settings import default_sim_settings, make_cfg
 from walker_env_habitat import WalkerEnvHabitat
+import habitat_sim.physics as phy
+# from pathos.multiprocessing import ProcessingPool as Pool
+
+sim_settings = default_sim_settings
+sim_settings["scene"] = "NONE"
+sim_settings.pop("scene_dataset_config_file")
+
+def env_fn(bvh_path):
+    return WalkerEnvHabitat(sim_settings, bvh_path)
 
 class PPO():
     def __init__(self, env, args, ac_kwargs=dict(), device='cpu'):
         self.num_envs = args.num_envs
         self.env_fn = env
-        self.envs = [env() for _ in range(self.num_envs)]
-        self.ac = core.MLPActorCritic(self.envs[0].get_observation().shape[0], len(self.envs[0].agent_model.joint_forces), args.log_policy_var, **ac_kwargs)
+        # self.envs = [env(args.bvh_path) for _ in range(self.num_envs)]
+        self.bvh_path = args.bvh_path
+        env_ = env(self.bvh_path)
+        self.ac = core.MLPActorCritic(env_.get_observation().shape[0], len(env_.agent_model.joint_forces), args.log_policy_var, **ac_kwargs)
         self.show_time = True
         self.episodes_per_epoch = args.episodes_per_epoch
         self.local_episodes_per_epoch = int(self.episodes_per_epoch / self.num_envs)
@@ -49,7 +60,7 @@ class PPO():
         seed = self.seed + 10000 * env_id
         torch.manual_seed(seed)
         np.random.seed(seed)
-        env = self.envs[env_id]
+        env = env_fn(self.bvh_path)
         trajs = []
         obs_buf = []
         act_buf = []
@@ -122,6 +133,8 @@ class PPO():
         buf['rews_total'] = np.array([np.sum(rews_buf_ep) for rews_buf_ep in rews_buf])
         buf['ep_len'] = np.array([len(rews_buf_ep) for rews_buf_ep in rews_buf])
         buf['rews_mean'] = np.array([np.mean(rews_buf_ep) for rews_buf_ep in rews_buf])
+        del env
+        print("deleted env, returning")
         return buf
 
     def combine_trajs(self, trajs):
@@ -147,9 +160,9 @@ class PPO():
         self.print_time("starting trajectory collection now")
         start_time = time.time()
         
-        # with Pool(self.num_envs) as p:
-        #     trajs = p.map(self._collect_trajectories_sequential, [i for i in range(self.num_envs)])
-        trajs = [self._collect_trajectories_sequential(i) for i in range(self.num_envs)]
+        with Pool(self.num_envs) as p:
+            trajs = p.map(self._collect_trajectories_sequential, [i for i in range(self.num_envs)])
+        # trajs = [self._collect_trajectories_sequential(i) for i in range(self.num_envs)]
 
         self.combine_trajs(trajs)
 
@@ -255,7 +268,7 @@ class PPO():
             self.episodes += self.episodes_per_epoch
 
     def save_gif(self):
-        env = self.envs[0]
+        env = env_fn(self.bvh_path)
         o, info = env.reset()
         frames = [env.render()]
         dir_ = f'gifs-{self.exp_name}'
@@ -273,6 +286,18 @@ class PPO():
             if terminated or truncated or num_steps > self.args.max_ep_len:
                 imageio.mimsave(path, frames)
                 break
+        
+        # print("last joint positions")
+        # model = env.agent_model
+        # for model_link_id in model.get_link_ids():
+        #     joint_type = model.get_link_joint_type(model_link_id)
+
+        #     if joint_type == phy.JointType.Fixed:
+        #         continue
+
+        #     joint_name = model.get_link_name(model_link_id)
+        #     offset = model.get_link_joint_pos_offset(model_link_id)
+        #     print(f"name={joint_name}, link_id={model_link_id}, offset={offset}, pos/angle={model.joint_positions[offset]}")
         imageio.imwrite(f'{dir_}/episodes_{self.episodes}.png', frames[0])
         return path
 
@@ -290,7 +315,7 @@ if __name__ == '__main__':
     args_dict = json.load(open("config/walker.json", "r"))
     args = Dict2Class(args_dict)
 
-    wandb.init(project=args.project_name, name=args.exp_name, reinit=False, config=args_dict, mode="disabled")
+    wandb.init(project=args.project_name, name=args.exp_name, reinit=False, config=args_dict, mode=args.wandb_mode)
 
     wandb.define_metric("pi/step")
     wandb.define_metric("pi/*", step_metric="pi/step")
@@ -300,20 +325,17 @@ if __name__ == '__main__':
     wandb.define_metric("reward/*", step_metric="reward/episodes")
     
     experiment_dir = pathlib.Path(args.experiment_dir)
-    bvh_path = list(experiment_dir.glob("*.bvh"))[0].as_posix()
+    args.bvh_path = list(experiment_dir.glob("*.bvh"))[0].as_posix()
     
     with open(experiment_dir.joinpath("vr_data.json")) as f:
         vr_data = json.load(f)
 
     start, end = vr_data["bvh_trim_indices"]
 
-    sim_settings = default_sim_settings
-    sim_settings["scene"] = "NONE"
-    sim_settings.pop("scene_dataset_config_file")
-
-    def env_fn():
-        return WalkerEnvHabitat(sim_settings, bvh_path)
     
     ppo = PPO(env_fn, args, ac_kwargs=dict(hidden_sizes=[args.hid]*args.l))
-    ppo.save_gif()
-    # ppo.train()
+    # ppo.save_gif()
+    ppo.train()
+
+# Command to run silently (no habitat-sim logging)
+# export MAGNUM_LOG=quiet HABITAT_SIM_LOG=quiet && python ppo_clip.py

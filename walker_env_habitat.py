@@ -56,7 +56,7 @@ class WalkerEnvHabitat():
             motion_stepper=0,
             fps=200, 
             frameskip=4,
-            urdf_path="human.urdf", #"/Users/rishi/Documents/Academics/stanford/contextual-character-animation/bullet3/data/quadruped/quadruped.urdf" #"/Users/rishi/Documents/Academics/stanford/contextual-character-animation/bullet3/data/humanoid/nao.urdf" #"CIRCLE_assets/subjects/1_agent.urdf"
+            urdf_path="CIRCLE_assets/subjects/1_agent.urdf", #"human.urdf", #"/Users/rishi/Documents/Academics/stanford/contextual-character-animation/bullet3/data/quadruped/quadruped.urdf" #"/Users/rishi/Documents/Academics/stanford/contextual-character-animation/bullet3/data/humanoid/nao.urdf" #"CIRCLE_assets/subjects/1_agent.urdf"
             ref_urdf_path="CIRCLE_assets/subjects/1.urdf" #"/Users/rishi/Documents/Academics/stanford/contextual-character-animation/bullet3/data/quadruped/quadruped.urdf" #"/Users/rishi/Documents/Academics/stanford/contextual-character-animation/bullet3/data/humanoid/nao.urdf" #"CIRCLE_assets/subjects/1_agent.urdf"
     ):
         self.sim_settings = sim_settings
@@ -79,6 +79,7 @@ class WalkerEnvHabitat():
         self._load_motion()
         # print("loaded motion")
 
+        self.ref_episode_len = len(self.motion.poses)
         # print("getting art obj manager")
         self.art_obj_mgr = self.sim.get_articulated_object_manager()
         self.agent_model = None
@@ -171,9 +172,9 @@ class WalkerEnvHabitat():
             filepath="simpleplane.urdf"
         )
         assert self.stage.is_alive
-        self.stage.motion_type = self.motion_type
+        self.stage.motion_type = phy.MotionType.DYNAMIC
         self.stage.rotation = global_correction_quat(mn.Vector3.z_axis(), mn.Vector3.x_axis()) #self.final_rotation_correction
-        self.stage.translation = mn.Vector3(0, 0, 0)
+        self.stage.translation = mn.Vector3(0,0,0) + mn.Vector3(0, -0.2, 0)
 
     def _add_agent_model(self):
         
@@ -182,7 +183,7 @@ class WalkerEnvHabitat():
             self.agent_model = None
 
         self.agent_model = self.art_obj_mgr.add_articulated_object_from_urdf(
-            filepath=self.urdf_path,
+            filepath=self.urdf_path, fixed_base=True
         )
 
         assert self.agent_model.is_alive
@@ -197,7 +198,7 @@ class WalkerEnvHabitat():
             self.ref_model = None
 
         self.ref_model = self.art_obj_mgr.add_articulated_object_from_urdf(
-            filepath=self.ref_urdf_path,
+            filepath=self.ref_urdf_path
         )
 
         assert self.ref_model.is_alive
@@ -211,22 +212,43 @@ class WalkerEnvHabitat():
         # print(f"action={action}")
         # self._next_ref_pose()
         posbefore = np.array(self.agent_model.translation)[2]
+        
+        self.add_pd_control()
 
         for _ in range(self.frameskip):
-            self.agent_model.add_joint_forces(action)
-            self.sim.step_world(1.0 / self.fps)
-
+            # self.agent_model.add_joint_forces(action)
+            self.sim.step_world()
+        
         height, posafter = np.array(self.agent_model.translation)[1:3]
-
+        # print("joint motor torques = ", self.agent_model.get_joint_motor_torques(self.fps))
         alive_bonus = 1.0
         reward = (posafter - posbefore) * self.fps
         reward += alive_bonus
         reward -= 1e-3 * np.square(action).sum()
-        terminated = not (height > 0.9 and height < 5 * self.init_height) or (max(np.abs(self.agent_model.joint_positions[31]), np.abs(self.agent_model.joint_positions[40])) > 1)
+        terminated = False
+        # terminated = not (height > 0.9 and height < 5 * self.init_height) or (max(np.abs(self.agent_model.joint_positions[31]), np.abs(self.agent_model.joint_positions[40])) > 1)
         # if height > 50 * self.init_height or np.max(self.agent_model.joint_velocities) > 5:
             # print(f"height={height}, init_height={self.init_height}, reward={reward}, terminated={terminated}, velocity={self.agent_model.joint_velocities}, maxVel={np.max(self.agent_model.joint_velocities)}, action={action}, maxAction={np.max(action)}")
 
         return self.get_observation(), reward, terminated, False, {}
+    
+    def add_pd_control(self):
+        for jm in self.pd_joint_motors:
+            self.agent_model.remove_joint_motor(jm)
+        
+        self.pd_joint_motors = []
+        new_pose, new_pose_T, new_root_translate, new_root_rotation = self.get_ref_pose()
+        model = self.agent_model
+        count = 0
+        for model_link_id in model.get_link_ids():
+            joint_type = model.get_link_joint_type(model_link_id)
+            if joint_type == phy.JointType.Fixed:
+                continue
+            elif joint_type == phy.JointType.Spherical:
+                self.pd_joint_motors.append(model.create_joint_motor(model_link_id, phy.JointMotorSettings(mn.Quaternion.from_matrix(conversions.T2R(new_pose_T[count])), 1, mn.Vector3(0,0,0), 0.1, 10)))
+            elif joint_type == phy.JointType.Revolute:
+                self.pd_joint_motors.append(model.create_joint_motor(model_link_id, phy.JointMotorSettings(new_pose[count], 1, 0, 0.1, 10)))
+            count += 1
         
     def _next_ref_pose(self):
         new_pose, new_pose_T, new_root_translate, new_root_rotation = self.get_ref_pose()
@@ -242,28 +264,44 @@ class WalkerEnvHabitat():
         return None
     
     def reset(self):
-        # self.motion_stepper = np.random.randint(0, len(self.motion.poses))
+        self.motion_stepper = 100
         self._add_agent_model()
         self._add_ref_model()
+        self.pd_joint_motors = []
         new_pose, new_pose_T, new_root_translate, new_root_rotation = self.get_ref_pose(raw=False)
         # print(f"jointpos = {np.zeros(len(self.agent_model.joint_positions))}, jointvel = {np.random.uniform(low=-0.005, high=0.005, size=len(self.agent_model.joint_velocities))}")
-        joint_positions = np.zeros(len(self.agent_model.joint_positions))
+        joint_positions = []
+        model = self.agent_model
+        for model_link_id in model.get_link_ids():
+            joint_type = model.get_link_joint_type(model_link_id)
+            if joint_type == phy.JointType.Fixed:
+                continue
+            elif joint_type == phy.JointType.Spherical:
+                joint_positions.append([0,0,0,1])
+                self.pd_joint_motors.append(model.create_joint_motor(model_link_id, phy.JointMotorSettings(mn.Quaternion(), 1, mn.Vector3(0,0,0), 0.1, 2)))
+            elif joint_type == phy.JointType.Revolute:
+                joint_positions.append([0])
+                self.pd_joint_motors.append(model.create_joint_motor(model_link_id, phy.JointMotorSettings(0, 1, 0, 0.1, 2)))
+        joint_positions = np.concatenate(joint_positions)
+        # print(f"joint position limits: {model.joint_position_limits}, joint positions: {model.joint_positions}")
+        # print(f"joint motor settings={model.get_joint_motor_settings()}")
+        
         # joint_positions[[31,40]] = -1
         # uncomment the next line for circle.urdf
         # joint_positions[3::4] = 1
         self.agent_model.joint_positions = joint_positions
-        self.agent_model.joint_velocities = np.random.uniform(low=-0.005, high=0.005, size=len(self.agent_model.joint_velocities))
+        # self.agent_model.joint_velocities = np.random.uniform(low=-0.005, high=0.005, size=len(self.agent_model.joint_velocities))
         # circle.urdf: global_correction_quat(mn.Vector3.z_axis(), -mn.Vector3.y_axis())
         # human.urdf: global_correction_quat(mn.Vector3.z_axis(), mn.Vector3.x_axis())
-        self.agent_model.rotation = global_correction_quat(mn.Vector3.z_axis(), mn.Vector3.x_axis()) 
+        self.agent_model.rotation = global_correction_quat(mn.Vector3.z_axis(), -mn.Vector3.y_axis()) 
         self.init_height = 1.1
         self.agent_model.translation = mn.Vector3(0, self.init_height, 0)
-        self.origin = self.agent_model.translation
+        self.origin = self.agent_model.translation #+ mn.Vector3(0.5, 0, 0.5)
         # print("joint positions", self.agent_model.joint_positions, self.agent_model.joint_velocities, self.agent_model.joint_forces)
 
         new_pose, new_pose_T, new_root_translate, new_root_rotation = self.get_ref_pose()
-        self.ref_model.joint_positions = new_pose
-        self.ref_model.joint_velocities = self.get_ref_velocity()
+        # self.ref_model.joint_positions = new_pose
+        # self.ref_model.joint_velocities = self.get_ref_velocity()
         self.ref_model.rotation = new_root_rotation
         self.ref_model.translation = new_root_translate
 
@@ -304,7 +342,8 @@ class WalkerEnvHabitat():
         """
         new_pose = []
         new_pose_T = []
-
+        new_pose_E = []
+        joint_names = []
         # Root joint
         root_T = pose.get_transform(ROOT, local=False)
         new_pose_T.append(root_T)
@@ -336,28 +375,33 @@ class WalkerEnvHabitat():
 
             joint_name = model.get_link_name(model_link_id)
             pose_joint_index = pose.skel.index_joint[joint_name]
-
+            joint_names.append(joint_name)
             # When the target joint do not have dof, we simply ignore it
 
             # When there is no matching between the given pose and the simulated character,
             # the character just tries to hold its initial pose
-            if pose_joint_index is None:
-                raise KeyError(
-                    "Error: pose data does not have a transform for that joint name"
-                )
-            elif joint_type not in [phy.JointType.Spherical]:
-                raise NotImplementedError(
-                    f"Error: {joint_type} is not a supported joint type"
-                )
-            else:
-                T = pose.get_transform(pose_joint_index, local=True)
-                if joint_type == phy.JointType.Spherical:
-                    Q, _ = conversions.T2Qp(T)
+            T = pose.get_transform(pose_joint_index, local=True)
+            E = conversions.R2E(conversions.T2R(T))
+            Q, _ = conversions.T2Qp(T)
+            # if pose_joint_index is None:
+            #     raise KeyError(
+            #         "Error: pose data does not have a transform for that joint name"
+            #     )
+            # elif joint_type == phy.JointType.Revolute:
+            #     E = conversions.R2E(conversions.T2R(T))
+            # elif joint_type == phy.JointType.Spherical:
+            #     Q, _ = conversions.T2Qp(T)
+            # else:
+            #     raise NotImplementedError(
+            #         f"Error: {joint_type} is not a supported joint type"
+            #     )
 
             new_pose += list(Q)
             new_pose_T.append(T)
-
-        return new_pose, new_pose_T, root_translation, root_rotation    
+            new_pose_E.append(E[np.argmax(np.abs(E))])
+            
+        print(f"E_len={len(new_pose_E)}, Q_len={len(new_pose)}, new_pose_E={list(zip(new_pose_E, joint_names))}, new_pose_Q={new_pose}")
+        return new_pose_E, new_pose_T, root_translation, root_rotation    
 
     def draw_axes(self, axis_len=1.0):
         lr = self.sim.get_debug_line_render()
@@ -388,7 +432,7 @@ if __name__ == '__main__':
     parser.add_argument(
         "--experiment_dir",
         type=str,
-        default="/Users/rishi/Documents/Academics/stanford/contextual-character-animation/habitat-sim-mocap/floorplanner_chunks.102815835-dining.dining1_chairs_1_dining1_213.1 copy 2/Batch0/floorplanner_chunks.102815835-dining.dining1_chairs_1_dining1_213.1.reaching.0451",
+        default="data/floorplanner_chunks.102815835-dining.dining1_chairs_1_dining1_213.1.reaching.0451",
         help="path to the folder with the bvh, urdf, and vr_data.json files",
     )
 
@@ -416,8 +460,8 @@ if __name__ == '__main__':
         os.mkdir(dir_)
 
     path = f'{dir_}/test2.gif'
-    for _ in range(100):
-        a = np.random.rand(len(env.agent_model.joint_forces))
+    for _ in range(100): # env.ref_episode_len
+        a = np.random.rand(len(env.agent_model.joint_forces)) / 2
         for _ in range(1):
             o, r, terminated, truncated, info = env.step(a)
         frames.append(env.render())

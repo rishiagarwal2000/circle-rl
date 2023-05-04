@@ -27,7 +27,7 @@ default_sim_settings = {
     "equirect_depth_sensor": False,
     "equirect_semantic_sensor": False,
     "seed": 1,
-    "silent": False,  # do not print log info (default: OFF)
+    "silent": True,  # do not print log info (default: OFF)
     # settings exclusive to example.py
     "save_png": False,  # save the pngs to disk (default: OFF)
     "print_semantic_scene": False,

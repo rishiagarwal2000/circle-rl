@@ -11,23 +11,21 @@ import os
 import json
 import pathlib
 from settings import default_sim_settings, make_cfg
-from walker_env_habitat import WalkerEnvHabitat
+from walker_dm2_habitat import WalkerEnvHabitat
 import habitat_sim.physics as phy
-from bullet_dm_env import BulletDeepmimicEnv
+from bullet_dm2_env import BulletDeepmimicEnv
 # from pathos.multiprocessing import ProcessingPool as Pool
 
 sim_settings = default_sim_settings
 sim_settings["scene"] = "NONE"
 sim_settings.pop("scene_dataset_config_file")
 
-def env_fn(bvh_path, name="bullet"):
-    if name == "bullet":
-        return BulletDeepmimicEnv(bvh_path)
-    else:
-        return WalkerEnvHabitat(sim_settings, bvh_path)
 
 class PPO():
-    def __init__(self, env_fn, args, ac_kwargs=dict(), device='cpu'):
+    def __init__(self, env_fn, args, ac_kwargs=dict()):
+        self.device = torch.device(args.device_name)
+        args.device = self.device
+
         self.num_envs = args.num_envs
         self.env_fn = env_fn
         self.conns = [Pipe() for _ in range(self.num_envs)]
@@ -44,7 +42,7 @@ class PPO():
         msg = self.pconns[0].recv()
         dims = msg.data
 
-        self.ac = core.MLPActorCritic(dims['obs_dim'], dims['act_dim'], args.log_policy_var, **ac_kwargs)
+        self.ac = core.MLPActorCritic(dims['obs_dim'], dims['act_dim'], args.log_policy_var, **ac_kwargs).to(args.device)
         
         self.show_time = True
         self.gamma, self.lam = args.gamma, args.lam
@@ -79,7 +77,7 @@ class PPO():
             self.rollout_buffer[k] = np.concatenate([trajs[i][k] for i in range(len(trajs))])
         
         self.rollout_buffer['adv'] = (self.rollout_buffer['adv'] - np.mean(self.rollout_buffer['adv'])) / np.std(self.rollout_buffer['adv'])
-        self.rollout_buffer = {k: torch.as_tensor(v, dtype=torch.float32) for k,v in self.rollout_buffer.items()}
+        self.rollout_buffer = {k: torch.as_tensor(v, dtype=torch.float32, device=self.device) for k,v in self.rollout_buffer.items()}
 
         buf = self.rollout_buffer
         newlogp = self.ac.pi(buf['obs'], buf['act'])[1]
@@ -110,7 +108,7 @@ class PPO():
     def compute_loss_pi(self):
         data = self.rollout_buffer
         obs, act, adv, logp_old = data['obs'], data['act'], data['adv'], data['logp']
-
+        # print(f"act={act}")
         # Policy loss
         pi, logp = self.ac.pi(obs, act)
         ratio = torch.exp(logp - logp_old)
@@ -119,6 +117,8 @@ class PPO():
 
         # Useful extra info
         approx_kl = (logp_old - logp).mean().item()
+        # print(f"logp_old={logp_old}")
+        # print(f"logp={logp}")
         ent = pi.entropy().mean().item()
         clipped = ratio.gt(1+self.clip_ratio) | ratio.lt(1-self.clip_ratio)
         clipfrac = torch.as_tensor(clipped, dtype=torch.float32).mean().item()
@@ -136,7 +136,7 @@ class PPO():
         # Train policy with multiple steps of gradient descent
         self.print_time("starting update pi now")
         start_time = time.time()
-
+        
         for i in range(self.train_pi_iters):
             self.pi_optimizer.zero_grad()
             loss_pi, pi_info = self.compute_loss_pi()
@@ -261,15 +261,17 @@ def env_run(env_id, args, env_fn, conn, local_episodes_per_epoch):
                 logp_buf_ep = []
                 num_steps = 0
                 while True:
-                    action, val, logp = ac.step(torch.as_tensor(observation, dtype=torch.float32))
+                    action, val, logp = ac.step(torch.as_tensor(observation, dtype=torch.float32, device=args.device))
 
                     obs_buf_ep.append(np.expand_dims(observation, axis=0))
                     act_buf_ep.append(np.expand_dims(action, axis=0))
                     logp_buf_ep.append(logp)
                     val_buf_ep.append(val)
                     
-                    newlogp = ac.pi(torch.as_tensor(observation, dtype=torch.float32), torch.as_tensor(action, dtype=torch.float32))[1]
-
+                    newlogp = ac.pi(torch.as_tensor(observation, dtype=torch.float32, device=args.device), torch.as_tensor(action, dtype=torch.float32, device=args.device))[1]
+                    approx_kl = (torch.tensor(logp) - newlogp).mean().item()
+                    # print(f"approx_kl={approx_kl}")
+                    assert np.isclose(approx_kl, 0), f"kl is large kl={approx_kl}"
                     assert torch.isclose(newlogp, torch.tensor(logp)), f"logp={logp}, newlogp={newlogp}"
 
                     observation, reward, terminated, truncated, info = env.step(action)
@@ -334,7 +336,7 @@ def env_run(env_id, args, env_fn, conn, local_episodes_per_epoch):
             num_steps = 0
             while True:
                 num_steps += 1
-                a, v, logp = ac.step(torch.as_tensor(o, dtype=torch.float32))
+                a, v, logp = ac.step(torch.as_tensor(o, dtype=torch.float32, device=args.device))
                 
                 o, r, terminated, truncated, info = env.step(a)
                 frames.append(env.render())
@@ -379,9 +381,14 @@ if __name__ == '__main__':
         vr_data = json.load(f)
 
     start, end = vr_data["bvh_trim_indices"]
+    end = 700
+    def env_fn(bvh_path, name="habitat"):
+        if name == "bullet":
+            return BulletDeepmimicEnv(bvh_path, motion_start=start, motion_end=end)
+        else:
+            return WalkerEnvHabitat(sim_settings, bvh_path, motion_start=start, motion_end=end)
 
-    
-    ppo = PPO(env_fn, args, ac_kwargs=dict(hidden_sizes=[args.hid]*args.l))
+    ppo = PPO(env_fn, args, ac_kwargs=dict(hidden_sizes=args.hid))
     # ppo.save_gif()
     ppo.train()
     ppo.close()

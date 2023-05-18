@@ -108,7 +108,7 @@ class MLPActorCritic(nn.Module):
 
 
     def __init__(self, observation_dim, action_dim, log_policy_var,
-                 hidden_sizes=(64,64), activation=nn.Tanh):
+                 hidden_sizes=(64,64), activation=nn.ReLU):
         super().__init__()
 
         obs_dim = observation_dim
@@ -128,7 +128,7 @@ class MLPActorCritic(nn.Module):
             a = pi.sample()
             logp_a = self.pi._log_prob_from_distribution(pi, a)
             v = self.v(obs)
-        return a.numpy(), v.numpy(), logp_a.numpy()
+        return a.cpu().numpy(), v.cpu().numpy(), logp_a.cpu().numpy()
 
     def act(self, obs):
         return self.step(obs)[0]

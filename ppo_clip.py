@@ -382,13 +382,15 @@ if __name__ == '__main__':
 
     start, end = vr_data["bvh_trim_indices"]
     end = 700
-    def env_fn(bvh_path, name="habitat"):
-        if name == "bullet":
-            return BulletDeepmimicEnv(bvh_path, motion_start=start, motion_end=end)
-        else:
-            return WalkerEnvHabitat(sim_settings, bvh_path, motion_start=start, motion_end=end)
+    def env_fn(name):
+        def fn(bvh_path):
+            if name == "bullet":
+                return BulletDeepmimicEnv(bvh_path, motion_start=start, motion_end=end)
+            else:
+                return WalkerEnvHabitat(sim_settings, bvh_path, motion_start=start, motion_end=end)
+        return fn
 
-    ppo = PPO(env_fn, args, ac_kwargs=dict(hidden_sizes=args.hid))
+    ppo = PPO(env_fn(args.sim), args, ac_kwargs=dict(hidden_sizes=args.hid))
     # ppo.save_gif()
     ppo.train()
     ppo.close()

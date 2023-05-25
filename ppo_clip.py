@@ -14,6 +14,7 @@ from settings import default_sim_settings, make_cfg
 from walker_dm2_habitat import WalkerEnvHabitat
 import habitat_sim.physics as phy
 from bullet_dm2_env import BulletDeepmimicEnv
+import sys
 # from pathos.multiprocessing import ProcessingPool as Pool
 
 sim_settings = default_sim_settings
@@ -362,7 +363,7 @@ class DataWrapper:
         return f"data={self.data}, command={self.command}"
 
 if __name__ == '__main__':
-    args_dict = json.load(open("config/walker.json", "r"))
+    args_dict = json.load(open(f"config/{sys.argv[1]}.json", "r"))
     args = Dict2Class(args_dict)
 
     wandb.init(project=args.project_name, name=args.exp_name, reinit=False, config=args_dict, mode=args.wandb_mode)
@@ -381,7 +382,7 @@ if __name__ == '__main__':
         vr_data = json.load(f)
 
     start, end = vr_data["bvh_trim_indices"]
-    end = 700
+    end = args.end
     def env_fn(name):
         def fn(bvh_path):
             if name == "bullet":

@@ -16,11 +16,12 @@
     "target_kl": 0.01,
     "log_policy_var": -1.0,
     "kl_multiplier": 1.5,
-    "exp_name": "bullet-deepmimic-20",
+    "exp_name": "bullet-deepmimic-bvh4-1",
     "wandb_mode": "run",
     "env_name": "BulletDeepmimicEnv",
     "project_name": "walker-habitat-sim",
-    "experiment_dir": "data/bvh2",
+    "experiment_dir": "data/bvh4",
     "device_name": "cuda",
-    "sim": "bullet"
+    "sim": "bullet",
+    "end": 600
 }

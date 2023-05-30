@@ -25,6 +25,7 @@ class BulletDeepmimicEnv():
                 fps=240, 
                 frameskip=4,
                 verbose=False,
+                add_scene=False,
                 urdf_path="CIRCLE_assets/subjects/amass.urdf",
                 ref_urdf_path="CIRCLE_assets/subjects/amass.urdf"):
         self._p = bullet_client.BulletClient()
@@ -34,6 +35,8 @@ class BulletDeepmimicEnv():
         self.verbose = verbose
 
         self.ref_offset = (1,1,0)
+        
+        self.add_scene = add_scene
 
         self.bvh_path = bvh_path
         self.motion_stepper = motion_stepper
@@ -59,6 +62,30 @@ class BulletDeepmimicEnv():
     
     def _add_stage(self):
         self._p.setGravity(0,0,-9.8)
+        
+        if self.add_scene:
+            N = 100
+            N_loop = N // 10 + (1 if N%10 != 0 else 0)
+            mapping = [350+i for i in range(N)]
+            for i in range(N_loop):
+                fnames = [f"floorplanner/floorplanner_{mapping[i]}.obj" for i in range(i * 10, min((i+1)*10, N))]
+                sceneShapeId = self._p.createVisualShapeArray(shapeTypes=[self._p.GEOM_MESH for _ in range(len(fnames))], 
+                                            fileNames=fnames, 
+                                            # rgbaColor=[1, 1, 1, 1],
+                                            # specularColor=[0.4, .4, 0],
+                                            # visualFramePosition=shift,
+                                            # meshScale=meshScale
+                                        )
+                sceneCollId = self._p.createCollisionShapeArray(shapeTypes=[self._p.GEOM_MESH for _ in range(len(fnames))], 
+                                            fileNames=fnames, 
+                                            # rgbaColor=[1, 1, 1, 1],
+                                            # specularColor=[0.4, .4, 0],
+                                            # visualFramePosition=shift,
+                                            # meshScale=meshScale
+                                        )
+                sceneId = self._p.createMultiBody(baseMass=0, baseCollisionShapeIndex=sceneCollId, baseVisualShapeIndex=sceneShapeId, baseOrientation=self._p.getQuaternionFromEuler([np.pi/2,0,np.pi/2]))
+                print(f"sceneId={sceneId}, fnames={fnames}")
+
         self.stage_id = self._p.loadURDF("plane.urdf")
     
     def _load_motion(self):
@@ -329,9 +356,9 @@ class BulletDeepmimicEnv():
         basePos, baseOrn, jointOrns = self._get_ref_pose(ref=True)
         print(f"min_pos={min_pos}, {basePos}, {self._p.getBasePositionAndOrientation(self.ref_id)},  linkName={link}")
 
-    def reset(self):
+    def reset(self, start=None):
         max_steps = int(self.fps * len(self.motion.poses) / self.motion.fps / self.frameskip)
-        self.motion_stepper = np.random.randint(0, int(3*max_steps/4))
+        self.motion_stepper = start if start is not None else np.random.randint(0, int(3*max_steps/4))
         self.set_pose(self.agent_id)
         self.set_pose(self.ref_id, ref=True)
         
@@ -411,7 +438,7 @@ if __name__ == '__main__':
     parser.add_argument(
         "--experiment_dir",
         type=str,
-        default="data/bvh2",
+        default="data/bvh3",
         help="path to the folder with the bvh, urdf, and vr_data.json files",
     )
 
@@ -425,28 +452,29 @@ if __name__ == '__main__':
         vr_data = json.load(f)
 
     start, end = vr_data["bvh_trim_indices"]
-    end = 700
     print(f"motion start={start}, end={end}")
-    env = BulletDeepmimicEnv(bvh_path, motion_start=start, motion_end=end)
+    end = 550
+    print(f"motion start={start}, end={end}")
+    env = BulletDeepmimicEnv(bvh_path, motion_start=start, motion_end=end, add_scene=True)
 
-    o, info = env.reset()
+    o, info = env.reset(0)
     frames = [env.render()]
-    dir_ = f'gifs-bullet-sim'
+    dir_ = f'gifs-bullet-sim-bvh1'
     
     if not os.path.isdir(dir_):
         os.mkdir(dir_)
 
-    path = f'{dir_}/test5.gif'
+    path = f'{dir_}/test5_scene.gif'
     start_time = time.time()
-    for _ in range(6000):
+    for _ in range(1000):
         # a = np.random.rand(env.get_action_dim()) / 3
         a = None
         o, r, terminated, truncated, info = env.step(a)
         print(f"r={r}, terminated={terminated}, truncated={truncated}, info={info}")
-        # frames.append(env.render())
-        # if terminated:
-        #     break
+        frames.append(env.render())
+        if terminated:
+            break
     end_time = time.time()
     print(f"sim time={end_time - start_time}")
-    # imageio.imwrite("gifs-bullet-sim/img.png", frames[0])
-    # imageio.mimsave(path, frames)
+    imageio.imwrite(f"{dir_}/img.png", frames[0])
+    imageio.mimsave(path, frames)

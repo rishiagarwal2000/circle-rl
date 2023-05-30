@@ -1,6 +1,6 @@
 {
     "hid": [1024, 512],
-    "num_envs": 10,
+    "num_envs": 1,
     "episodes_per_epoch": 300,
     "max_ep_len": 300,
     "total_episodes": 6000000,
@@ -17,14 +17,14 @@
     "target_kl": 0.01,
     "log_policy_var": -1.0,
     "kl_multiplier": 1.5,
-    "exp_name": "bullet-deepmimic-bvh3-3",
-    "wandb_mode": "run",
+    "exp_name": "bullet-deepmimic-bvh3-2",
+    "wandb_mode": "disabled",
     "env_name": "BulletDeepmimicEnv",
     "project_name": "walker-habitat-sim",
     "experiment_dir": "data/bvh3",
-    "device_name": "cuda",
+    "device_name": "cpu",
     "sim": "bullet",
     "end": 550,
-    "load_episode": -1,
-    "do": "train"
+    "load_episode": 4800,
+    "do": "eval"
 }

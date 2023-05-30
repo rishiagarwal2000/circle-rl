@@ -122,10 +122,13 @@ class MLPActorCritic(nn.Module):
         # build value function
         self.v  = MLPCritic(obs_dim, hidden_sizes, activation)
 
-    def step(self, obs):
+    def step(self, obs, do="train"):
         with torch.no_grad():
             pi = self.pi._distribution(obs)
-            a = pi.sample()
+            if do == "train":
+                a = pi.sample()
+            else:
+                a = pi.mean
             logp_a = self.pi._log_prob_from_distribution(pi, a)
             v = self.v(obs)
         return a.cpu().numpy(), v.cpu().numpy(), logp_a.cpu().numpy()

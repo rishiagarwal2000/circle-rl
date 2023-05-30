@@ -202,16 +202,48 @@ class PPO():
             if self.episodes % self.log_episodes == 0:
                 self.log_step()
 
+            if self.episodes % self.args.save_every == 0:
+                self.save_model()
+
             self.update_step()
 
             self.episodes += self.episodes_per_epoch
 
+    def save_model(self):
+        dir_ = f'models-{self.args.exp_name}'
+            
+        if not os.path.isdir(dir_):
+            os.mkdir(dir_)
+
+        path = f'{dir_}/episodes_{self.episodes}.pt'
+        
+        torch.save({
+            'episodes': self.episodes,
+            'model_state_dict': self.ac.state_dict(),
+            'pi_opt_state_dict': self.pi_optimizer.state_dict(),
+            'val_opt_state_dict': self.vf_optimizer.state_dict(),
+            'args': self.args
+            }, path)
+
     def save_gif(self):
         pconn = self.pconns[0]
-        pconn.send(DataWrapper("save_gif", (self.ac, self.episodes)))
+        command = "save_gif" if self.args.do == "train" else "eval"
+        pconn.send(DataWrapper(command, (self.ac, self.episodes)))
         msg = pconn.recv()
         path = msg.data
         return path
+
+    def simulate(self):
+        dir_ = f'models-{self.args.exp_name}'
+        path = f'{dir_}/episodes_{self.args.load_episode}.pt'
+
+        checkpoint = torch.load(path, map_location=self.device)
+        self.ac.load_state_dict(checkpoint['model_state_dict'])
+        self.pi_optimizer.load_state_dict(checkpoint['pi_opt_state_dict'])
+        self.vf_optimizer.load_state_dict(checkpoint['val_opt_state_dict'])
+        self.episodes = self.args.load_episode
+        # print(f"load_episode={self.episodes}, {self.args.load_episode}")
+        self.save_gif()
 
     def print_time(self, *args, **kwargs):
         if self.show_time:
@@ -324,11 +356,14 @@ def env_run(env_id, args, env_fn, conn, local_episodes_per_epoch):
         elif data.command == 'get_dims':
             data.data = {"obs_dim": env.get_observation().shape[0], "act_dim": env.get_action_dim()}
             conn.send(data)
-        elif data.command == 'save_gif':
+        elif data.command in ['save_gif', 'eval']:
             ac, episodes = data.data
-            o, info = env.reset()
+            if data.command == 'save_gif':
+                o, info = env.reset()
+            else:
+                o, info = env.reset(0)
             frames = [env.render()]
-            dir_ = f'gifs-{args.exp_name}'
+            dir_ = f'gifs-{args.exp_name}' if data.command == 'save_gif' else f'eval-{args.exp_name}'
             
             if not os.path.isdir(dir_):
                 os.mkdir(dir_)
@@ -337,7 +372,7 @@ def env_run(env_id, args, env_fn, conn, local_episodes_per_epoch):
             num_steps = 0
             while True:
                 num_steps += 1
-                a, v, logp = ac.step(torch.as_tensor(o, dtype=torch.float32, device=args.device))
+                a, v, logp = ac.step(torch.as_tensor(o, dtype=torch.float32, device=args.device), do="eval")
                 
                 o, r, terminated, truncated, info = env.step(a)
                 frames.append(env.render())
@@ -386,14 +421,17 @@ if __name__ == '__main__':
     def env_fn(name):
         def fn(bvh_path):
             if name == "bullet":
-                return BulletDeepmimicEnv(bvh_path, motion_start=start, motion_end=end)
+                return BulletDeepmimicEnv(bvh_path, motion_start=start, motion_end=end, add_scene=(args.do == "eval"))
             else:
                 return WalkerEnvHabitat(sim_settings, bvh_path, motion_start=start, motion_end=end)
         return fn
 
     ppo = PPO(env_fn(args.sim), args, ac_kwargs=dict(hidden_sizes=args.hid))
     # ppo.save_gif()
-    ppo.train()
+    if args.do == 'train':
+        ppo.train()
+    else:
+        ppo.simulate()
     ppo.close()
 
 # Command to run silently (no habitat-sim logging)

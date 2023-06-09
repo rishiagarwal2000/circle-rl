@@ -25,6 +25,6 @@
     "device_name": "cpu",
     "sim": "bullet",
     "end": 550,
-    "load_episode": 4800,
+    "load_episode": 21000,
     "do": "eval"
 }

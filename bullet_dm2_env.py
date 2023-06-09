@@ -4,6 +4,7 @@ import pybullet_data
 
 import os
 import numpy as np
+from scipy.spatial.transform import Rotation as R
 import pathlib
 import json
 import imageio
@@ -16,6 +17,26 @@ from fairmotion.ops.motion import cut, rotate, translate
 
 import time
 
+def global_correction_quat(up_v: mn.Vector3, forward_v: mn.Vector3) -> mn.Quaternion:
+    """
+    Given the upward direction and the forward direction of a local space frame, this methd produces
+    the correction quaternion to convert the frame to global space (+Y up, -Z forward).
+    """
+    if up_v.normalized() != mn.Vector3.y_axis():
+        angle1 = mn.math.angle(up_v.normalized(), mn.Vector3.y_axis())
+        axis1 = mn.math.cross(up_v.normalized(), mn.Vector3.y_axis())
+        rotation1 = mn.Quaternion.rotation(angle1, axis1)
+        forward_v = rotation1.transform_vector(forward_v)
+    else:
+        rotation1 = mn.Quaternion()
+
+    forward_v = forward_v * (mn.Vector3(1.0, 1.0, 1.0) - mn.Vector3.y_axis())
+    angle2 = mn.math.angle(forward_v.normalized(), -1 * mn.Vector3.z_axis())
+    axis2 = mn.Vector3.y_axis()
+    rotation2 = mn.Quaternion.rotation(angle2, axis2)
+
+    return rotation2 * rotation1
+
 class BulletDeepmimicEnv():
     def __init__(self,
                 bvh_path,
@@ -27,14 +48,16 @@ class BulletDeepmimicEnv():
                 verbose=False,
                 add_scene=False,
                 urdf_path="CIRCLE_assets/subjects/amass.urdf",
-                ref_urdf_path="CIRCLE_assets/subjects/amass.urdf"):
+                ref_urdf_path="CIRCLE_assets/subjects/amass.urdf",
+                use_dumped_torques=False):
         self._p = bullet_client.BulletClient()
         self._p.setRealTimeSimulation(0)
         self._p.setTimeStep(1/fps)
+        self._p.setPhysicsEngineParameter(numSolverIterations=30)
         self._p.setAdditionalSearchPath(pybullet_data.getDataPath())
         self.verbose = verbose
 
-        self.ref_offset = (1,1,0)
+        self.ref_offset = (-1,0,1)
         
         self.add_scene = add_scene
 
@@ -59,14 +82,20 @@ class BulletDeepmimicEnv():
         self._add_agent()
         # print("Added stage")
         self.reset()
+        
+        self.use_dumped_torques = use_dumped_torques
+        if use_dumped_torques:
+            self.torques = np.loadtxt('torques2.txt')
+        else:
+            self.torques = []
     
     def _add_stage(self):
-        self._p.setGravity(0,0,-9.8)
+        self._p.setGravity(0,-9.8,0)
         
         if self.add_scene:
-            N = 100
+            N = 20
             N_loop = N // 10 + (1 if N%10 != 0 else 0)
-            mapping = [350+i for i in range(N)]
+            mapping = [504+i for i in range(N)]
             for i in range(N_loop):
                 fnames = [f"floorplanner/floorplanner_{mapping[i]}.obj" for i in range(i * 10, min((i+1)*10, N))]
                 sceneShapeId = self._p.createVisualShapeArray(shapeTypes=[self._p.GEOM_MESH for _ in range(len(fnames))], 
@@ -83,15 +112,15 @@ class BulletDeepmimicEnv():
                                             # visualFramePosition=shift,
                                             # meshScale=meshScale
                                         )
-                sceneId = self._p.createMultiBody(baseMass=0, baseCollisionShapeIndex=sceneCollId, baseVisualShapeIndex=sceneShapeId, baseOrientation=self._p.getQuaternionFromEuler([np.pi/2,0,np.pi/2]))
+                sceneId = self._p.createMultiBody(baseMass=0, baseCollisionShapeIndex=sceneCollId, baseVisualShapeIndex=sceneShapeId, baseOrientation=self._p.getQuaternionFromEuler([0,0,0]))
                 print(f"sceneId={sceneId}, fnames={fnames}")
 
-        self.stage_id = self._p.loadURDF("plane.urdf")
+        self.stage_id = self._p.loadURDF("plane.urdf", baseOrientation=self._p.getQuaternionFromEuler([-np.pi/2,0,0]))
     
     def _load_motion(self):
         # loading text because the setup pauses here during motion load
         self.print_debug("Loading...")
-        quat = self._p.getQuaternionFromEuler([np.pi/2,0,0])
+        quat = self._p.getQuaternionFromEuler([0,0,0])
         # final_rotation_correction = mn.Quaternion((quat[:3], quat[3]))
         self.motion = cut(bvh.load(file=self.bvh_path), self.motion_start, self.motion_end) #, np.array(self.final_rotation_correction.to_matrix())) #cut(bvh.load(file=self.bvh_path), self.motion_start, self.motion_end)
         # self.motion = rotate(self.motion, np.array(final_rotation_correction.to_matrix()))
@@ -104,11 +133,11 @@ class BulletDeepmimicEnv():
         self.print_debug("Done Loading.")
     
     def _add_agent(self):
-        startPos = [0,0,1.25]
-        startOrientation = self._p.getQuaternionFromEuler([0,0,0])
+        startPos = [0,1.25,0]
+        startOrientation = self._p.getQuaternionFromEuler([np.pi/2,0,0])
 
         def add_wo_motors(path):
-            handle = self._p.loadURDF(self.agent_urdf_path, startPos, startOrientation)
+            handle = self._p.loadURDF(self.agent_urdf_path, startPos, startOrientation, useFixedBase=False)
             jointIndices = [i for i in range(self._p.getNumJoints(handle)) if self._p.getJointInfo(handle, i)[2] == self._p.JOINT_SPHERICAL]
             self._p.setJointMotorControlMultiDofArray(
                 handle,
@@ -128,15 +157,61 @@ class BulletDeepmimicEnv():
     def get_action_dim(self):
         jointIndices = [i for i in range(self._p.getNumJoints(self.agent_id)) if self._p.getJointInfo(self.agent_id, i)[2] == self._p.JOINT_SPHERICAL]
         return 3 * len(jointIndices)
+    
+    def pd_controller(self, tgt_pose, kp=10, kd=0.1):
+        jointIndices = [i for i in range(self._p.getNumJoints(self.agent_id)) if self._p.getJointInfo(self.agent_id, i)[2] == self._p.JOINT_SPHERICAL]
+        obs = self.get_observation(type_="dict")
+        jpose = obs["jpose"][1:]
+        jvels = obs["jvel"][2:]
+        print(jpose.shape, jvels.shape, np.array(tgt_pose).shape)
+
+        # print(f"jpose={jpose}, tgt_pose={tgt_pose}")
+        print(f"diffs={[np.array(self._p.getAxisDifferenceQuaternion(rp, sp)) for (sp,rp,vel) in zip(jpose, tgt_pose, jvels)]}, vels={jvels}")
+        torques = [kp * np.array(self._p.getAxisDifferenceQuaternion(rp, sp)) - kd * vel  for (sp,rp,vel) in zip(jpose, tgt_pose, jvels)]
+        torques = np.array(torques).flatten()
+        torques = np.clip(10 * torques, -1000, 1000)
+        # print(f"torques={torques}")
+        # exit(1)
+        return torques
 
     def step(self, action=None, w={"basePos": 0.2, "jpose": 0.65, "end":0.15, "jvel": 0.0}, a={"basePos": 10, "jpose": 2, "end": 40, "vel": 0.1}):
-        self.motion_stepper = self.motion_stepper+1
+        self.motion_stepper += 1  
         
-        self.apply_position_control()
-        self.apply_action(action)
+        sim_data = self.get_observation(type_="dict")
         
-        for _ in range(self.frameskip):
+        if action is None:
+            basePos, baseOrn, jointOrns = self._get_ref_pose()
+            action = jointOrns
+        else:
+            # print(f"action={action}")
+            basePos, baseOrn, jointOrns = self._get_ref_pose()
+            cur_pose = sim_data["jpose"][1:] # jointOrns #
+            cur_pose_rotvec = [R.from_quat(c) for c in cur_pose]
+            action = action.reshape(-1,3)
+            # print(f"action={action}, cur_pose_rotvec={cur_pose_rotvec}")
+            action = [(R.from_rotvec(action[i]) * cur_pose_rotvec[i]).as_quat() for i in range(action.shape[0])] # + cur_pose_rotvec[i]).as_quat()
+        
+        self.apply_position_control(action)
+        
+        # if not self.use_dumped_torques:
+        #     self.apply_position_control()
+        #     self.apply_action(action)
+            # pass
+        
+
+        for f in range(self.frameskip):
+            # if self.use_dumped_torques:
+            #     action = self.torques[(self.motion_stepper-1)*self.frameskip + f]
+            #     print(f"action={action}, ")
+            #     self.apply_torque_control(action)
+            # else:
+            #     self.apply_action(action)
+            # self.print_existing_torques()
+            # computed_torques = self.pd_controller(action)
+            # # print(f"computed_torques={computed_torques}")
+            # self.apply_torque_control(computed_torques)
             self._p.stepSimulation()
+            # self.print_existing_torques()
             # pass
         
         self.update_ref()
@@ -164,12 +239,32 @@ class BulletDeepmimicEnv():
         terminated = False
         if reward < 0.1 or (self.motion_stepper+1) * self.frameskip / self.fps > len(self.motion.poses) / self.motion.fps:
             terminated = True
+            if not self.use_dumped_torques:
+                np.savetxt("torques2.txt", np.array(self.torques))
         # reward += not terminated
         # print(f"reward={reward}, terminated={terminated}")
         return obs, reward, terminated, False, {"diff": diff}
 
     def update_ref(self):
         self.set_pose(self.ref_id, ref=True)
+
+    def apply_torque_control(self, scaled_action):
+        jointIndices = [i for i in range(self._p.getNumJoints(self.agent_id)) if self._p.getJointInfo(self.agent_id, i)[2] == self._p.JOINT_SPHERICAL]
+        
+        self._p.setJointMotorControlMultiDofArray(
+            self.agent_id, 
+            jointIndices=jointIndices, 
+            controlMode=self._p.TORQUE_CONTROL, 
+            forces=[scaled_action[ind*3:ind*3+3] for ind in range(0, int(self.get_action_dim() / 3))]
+        )
+    
+    def print_existing_torques(self):
+        jointIndices = [i for i in range(self._p.getNumJoints(self.agent_id)) if self._p.getJointInfo(self.agent_id, i)[2] == self._p.JOINT_SPHERICAL]
+        existing_torques = []
+        for j in jointIndices:
+            js = self._p.getJointStateMultiDof(self.agent_id, j)
+            existing_torques.append(js[-1])
+        print(f"existing_torques={existing_torques}")
 
     def apply_action(self, action):
         jointIndices = [i for i in range(self._p.getNumJoints(self.agent_id)) if self._p.getJointInfo(self.agent_id, i)[2] == self._p.JOINT_SPHERICAL]
@@ -180,27 +275,28 @@ class BulletDeepmimicEnv():
                 js = self._p.getJointStateMultiDof(self.agent_id, j)
                 existing_torques.append(js[-1])
             
-            self._p.setJointMotorControlMultiDofArray(
-                self.agent_id, 
-                jointIndices=jointIndices, 
-                controlMode=self._p.TORQUE_CONTROL, 
-                forces=[np.clip(30 * action[ind*3:ind*3+3], -50, 50) for ind in range(0, int(self.get_action_dim() / 3))]
-            )
+            scaled_action = np.clip(30 * action, -50, 50)
+            self.apply_torque_control(scaled_action)
             new_torques = []
             for j in jointIndices:
                 js = self._p.getJointStateMultiDof(self.agent_id, j)
                 new_torques.append(js[-1])
-            # print(f"action={action}, existing_torques={existing_torques}, new_torques={new_torques}")
 
-    def apply_position_control(self):
+            torques = np.array([e for t in new_torques for e in t]) + np.array(scaled_action)
+            self.torques.append(torques)
+            # print(f"action={action}, existing_torques={existing_torques}, new_torques={new_torques}, torques={torques}")
+
+    def apply_position_control(self, tgt_pose=None):
         jointIndices = [i for i in range(self._p.getNumJoints(self.agent_id)) if self._p.getJointInfo(self.agent_id, i)[2] == self._p.JOINT_SPHERICAL]
-        basePos, baseOrn, jointOrns = self._get_ref_pose()
+        
+        if tgt_pose is None:
+            basePos, baseOrn, tgt_pose = self._get_ref_pose()
 
         self._p.setJointMotorControlMultiDofArray(
             self.agent_id, 
             jointIndices=jointIndices, 
             controlMode=self._p.POSITION_CONTROL, 
-            targetPositions=[jointOrns[j] for j in range(len(jointIndices))], targetVelocities=[[0.0,0.0,0.0] for _ in range(len(jointIndices))], 
+            targetPositions=[tgt_pose[j] for j in range(len(jointIndices))], targetVelocities=[[0.0,0.0,0.0] for _ in range(len(jointIndices))], 
             positionGains=[0.5 for _ in range(len(jointIndices))], velocityGains=[0.1 for _ in range(len(jointIndices))],
             forces=[[1000,1000,1000] for _ in range(len(jointIndices))]
         )
@@ -213,7 +309,7 @@ class BulletDeepmimicEnv():
         basePos, baseOrn = self._p.getBasePositionAndOrientation(handle)
         baseLinVel, baseAngVel = self._p.getBaseVelocity(handle)
         
-        pose += baseOrn + basePos
+        pose +=  list(basePos) + list(R.from_quat(baseOrn).as_rotvec())
         vel += baseAngVel + baseLinVel
         
         jposes = [baseOrn]
@@ -226,7 +322,7 @@ class BulletDeepmimicEnv():
 
             if jointInfo[2] == self._p.JOINT_SPHERICAL:
                 jpos, jvel = jointState[:2]
-                pose += jpos
+                pose += list(R.from_quat(jpos).as_rotvec())
                 vel += jvel
                 jposes.append(jpos)
                 jvels.append(jvel)
@@ -234,12 +330,12 @@ class BulletDeepmimicEnv():
             if "wrist" in jointName or "ankle" in jointName:
                 li = self._p.getLinkState(handle, j, computeForwardKinematics=1)
                 eff_loc.append(np.array(li[0]) - np.array(basePos))
-
+        # print(f"pose: {len(pose)}, {pose}")
         basePos = tuple(np.array(basePos) - np.array(self.ref_offset)) if handle == self.ref_id else basePos
         if type_ == "array":
             return np.concatenate((pose, vel))
         elif type_ == "dict":
-            return {"basePos": np.array(basePos)[:2], "jpose": np.array(jposes), "jvel": np.array(jvels), "end": np.array(eff_loc)-np.array(basePos)}
+            return {"basePos": np.array(basePos)[[0,2]], "jpose": np.array(jposes), "jvel": np.array(jvels), "end": np.array(eff_loc)-np.array(basePos)}
         else:
             raise NotImplementedError(f"type_={type_} not found")
     
@@ -249,10 +345,10 @@ class BulletDeepmimicEnv():
         pose = self.motion.get_pose_by_time(self.motion_stepper * 1 / self.fps * self.frameskip) #poses[self.motion_stepper]
 
         root_T = pose.get_transform(ROOT, local=False)
-        root_T[0:3, 3] = -root_T[0, 3], root_T[2, 3], root_T[1, 3]
+        # root_T[0:3, 3] = -root_T[0, 3], root_T[2, 3], root_T[1, 3]
 
         quat = self._p.getQuaternionFromEuler([0,0,0])
-        final_rotation_correction = mn.Quaternion((quat[:3], quat[3]))
+        final_rotation_correction = global_correction_quat(mn.Vector3.z_axis(), -mn.Vector3.y_axis()) #mn.Quaternion((quat[:3], quat[3]))
         # print(f"final_rot_correction={final_rotation_correction}")
         
         root_rotation = final_rotation_correction * mn.Quaternion.from_matrix(
@@ -269,11 +365,10 @@ class BulletDeepmimicEnv():
         # height_correct = -np.min(positions, axis=0)[2]
         # global_translation_offset = mn.Vector3(0,0,height_correct) if not ref else mn.Vector3(0,0,height_correct) + mn.Vector3(self.ref_offset)
         # print(f'root_t={root_T[0:3, 3]}, transformed_root_t={final_rotation_correction.transform_vector(root_T[0:3, 3])}')
-        global_translation_offset = mn.Vector3(0,0,0.02) if not ref else mn.Vector3(0,0,0.02) + mn.Vector3(self.ref_offset)
-        root_translation = (
-            global_translation_offset
-            + final_rotation_correction.transform_vector(root_T[0:3, 3])
-        )
+        global_translation_offset = mn.Vector3(0,0.02,0) if not ref else mn.Vector3(0,0.02,0) + mn.Vector3(self.ref_offset)
+        root_translation = final_rotation_correction.transform_vector(root_T[0:3, 3])
+
+        root_translation = mn.Vector3([-root_translation[0], root_translation[2], root_translation[1]]) + global_translation_offset
 
         # self.print_debug(f"joint names={pose.skel.index_joint.keys()}")
         targetPositions = []
@@ -402,7 +497,7 @@ class BulletDeepmimicEnv():
 
     def render(self, keys=(0, "color_sensor")):
         cam_dist = 3
-        cam_yaw = -15
+        cam_yaw = 15
         cam_pitch = -15
         render_width = 500
         render_height = 500
@@ -412,7 +507,7 @@ class BulletDeepmimicEnv():
                                                             yaw=cam_yaw,
                                                             pitch=cam_pitch,
                                                             roll=0,
-                                                            upAxisIndex=2)
+                                                            upAxisIndex=1)
         proj_matrix = self._p.computeProjectionMatrixFOV(fov=60,
                                                     aspect=float(render_width) /
                                                     render_height,
@@ -455,7 +550,7 @@ if __name__ == '__main__':
     print(f"motion start={start}, end={end}")
     end = 550
     print(f"motion start={start}, end={end}")
-    env = BulletDeepmimicEnv(bvh_path, motion_start=start, motion_end=end, add_scene=True)
+    env = BulletDeepmimicEnv(bvh_path, motion_start=start, motion_end=end, add_scene=False)
 
     o, info = env.reset(0)
     frames = [env.render()]
@@ -466,9 +561,10 @@ if __name__ == '__main__':
 
     path = f'{dir_}/test5_scene.gif'
     start_time = time.time()
-    for _ in range(1000):
+    for _ in range(300):
         # a = np.random.rand(env.get_action_dim()) / 3
-        a = None
+        a = np.zeros(env.get_action_dim())
+        # a = None
         o, r, terminated, truncated, info = env.step(a)
         print(f"r={r}, terminated={terminated}, truncated={truncated}, info={info}")
         frames.append(env.render())

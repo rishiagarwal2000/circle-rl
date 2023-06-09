@@ -32,9 +32,9 @@ class PPO():
         self.conns = [Pipe() for _ in range(self.num_envs)]
         self.pconns = [conn[0] for conn in self.conns]
         self.cconns = [conn[1] for conn in self.conns]
-        self.episodes_per_epoch = args.episodes_per_epoch
-        self.local_episodes_per_epoch = int(self.episodes_per_epoch / self.num_envs)
-        self.envs = [Process(target=env_run, args=(i, args, env_fn, conn, self.local_episodes_per_epoch)) for i, conn in enumerate(self.cconns)]
+        self.steps_per_epoch = args.steps_per_epoch
+        self.local_steps_per_epoch = int(self.steps_per_epoch / self.num_envs)
+        self.envs = [Process(target=env_run, args=(i, args, env_fn, conn, self.local_steps_per_epoch)) for i, conn in enumerate(self.cconns)]
         for p in self.envs:
             p.start()
         self.bvh_path = args.bvh_path
@@ -60,9 +60,9 @@ class PPO():
         self.train_pi_iters = args.train_pi_iters
         self.train_v_iters = args.train_v_iters
 
-        self.total_episodes = args.total_episodes
-        self.episodes = 0
-        self.log_episodes = args.log_episodes
+        self.total_steps = args.total_steps
+        self.steps = 0
+        self.log_steps = args.log_steps
         self.v_steps = 0
         self.pi_steps = 0
         self.exp_name = args.exp_name
@@ -94,16 +94,16 @@ class PPO():
         
         trajs = []
         for pconn in self.pconns:
-            msg = DataWrapper("simulate", self.ac)
+            msg = DataWrapper("simulate", self.ac.to(torch.device('cpu')))
             pconn.send(msg)
         for pconn in self.pconns:
             msg = pconn.recv()
             trajs.append(msg.data)
-
+        self.ac.to(self.device)
         self.combine_trajs(trajs)
 
         end_time = time.time()
-        self.print_time(f"trajectory collection time = {end_time-start_time}s")
+        self.print_time(f"trajectory collection time = {end_time-start_time}s, buffer size={self.rollout_buffer['obs'].shape[0]}")
     
     # Set up function for computing PPO policy loss
     def compute_loss_pi(self):
@@ -177,10 +177,10 @@ class PPO():
         self.loss_pi, self.loss_v = loss_pi.item(), loss_v.item()
 
         gif_path = self.save_gif()
-        wandb.log({"reward/avg reward vs number of episodes": torch.mean(self.rollout_buffer['rews_mean']).cpu().numpy(),
-                "reward/total reward (averaged over multiple episodes) vs number of episodes": torch.mean(self.rollout_buffer['rews_total']).cpu().numpy(),
-                "reward/episode length (averaged over multiple episodes) vs number of episodes": torch.mean(self.rollout_buffer['ep_len']).cpu().numpy(),
-                "reward/episodes": self.episodes, "reward/video": wandb.Video(gif_path), "v/loss_v": self.loss_v, "v/step": self.v_steps,
+        wandb.log({"reward/avg reward vs number of steps": torch.mean(self.rollout_buffer['rews_mean']).cpu().numpy(),
+                "reward/total reward (averaged over multiple steps) vs number of steps": torch.mean(self.rollout_buffer['rews_total']).cpu().numpy(),
+                "reward/episode length (averaged over multiple episodes) vs number of steps": torch.mean(self.rollout_buffer['ep_len']).cpu().numpy(),
+                "reward/steps": self.steps, "reward/video": wandb.Video(gif_path), "v/loss_v": self.loss_v, "v/step": self.v_steps,
                 "pi/loss": self.loss_pi, "pi/step": self.pi_steps, **{f"pi/log_std[{i}]": val.item() for i,val in enumerate(self.ac.pi.log_std)}
                 }
             )
@@ -196,18 +196,18 @@ class PPO():
 
     def train(self):
         # run train_step num_train times
-        while self.episodes < self.total_episodes:
+        while self.steps < self.total_steps:
             self.collect_trajectories()
 
-            if self.episodes % self.log_episodes == 0:
+            if self.steps % self.log_steps == 0:
                 self.log_step()
 
-            if self.episodes % self.args.save_every == 0:
+            if self.steps % self.args.save_every == 0:
                 self.save_model()
 
             self.update_step()
 
-            self.episodes += self.episodes_per_epoch
+            self.steps += self.steps_per_epoch
 
     def save_model(self):
         dir_ = f'models-{self.args.exp_name}'
@@ -215,10 +215,10 @@ class PPO():
         if not os.path.isdir(dir_):
             os.mkdir(dir_)
 
-        path = f'{dir_}/episodes_{self.episodes}.pt'
+        path = f'{dir_}/steps_{self.steps}.pt'
         
         torch.save({
-            'episodes': self.episodes,
+            'steps': self.steps,
             'model_state_dict': self.ac.state_dict(),
             'pi_opt_state_dict': self.pi_optimizer.state_dict(),
             'val_opt_state_dict': self.vf_optimizer.state_dict(),
@@ -228,21 +228,21 @@ class PPO():
     def save_gif(self):
         pconn = self.pconns[0]
         command = "save_gif" if self.args.do == "train" else "eval"
-        pconn.send(DataWrapper(command, (self.ac, self.episodes)))
+        pconn.send(DataWrapper(command, (self.ac, self.steps)))
         msg = pconn.recv()
         path = msg.data
         return path
 
     def simulate(self):
         dir_ = f'models-{self.args.exp_name}'
-        path = f'{dir_}/episodes_{self.args.load_episode}.pt'
+        path = f'{dir_}/steps_{self.args.load_step}.pt'
 
         checkpoint = torch.load(path, map_location=self.device)
         self.ac.load_state_dict(checkpoint['model_state_dict'])
         self.pi_optimizer.load_state_dict(checkpoint['pi_opt_state_dict'])
         self.vf_optimizer.load_state_dict(checkpoint['val_opt_state_dict'])
-        self.episodes = self.args.load_episode
-        # print(f"load_episode={self.episodes}, {self.args.load_episode}")
+        self.steps = self.args.load_step
+        # print(f"load_step={self.steps}, {self.args.load_step}")
         self.save_gif()
 
     def print_time(self, *args, **kwargs):
@@ -257,7 +257,7 @@ class PPO():
         for p in self.envs:
             p.join()
 
-def env_run(env_id, args, env_fn, conn, local_episodes_per_epoch):
+def env_run(env_id, args, env_fn, conn, local_steps_per_epoch):
     env = env_fn(args.bvh_path)
     max_ep_len = args.max_ep_len
     
@@ -282,7 +282,11 @@ def env_run(env_id, args, env_fn, conn, local_episodes_per_epoch):
             break
         elif data.command == 'simulate':
             ac = data.data
-            for i in range(local_episodes_per_epoch):
+            total_steps = 0
+            total_env_step_time = 0
+            total_ac_step_time = 0
+            total_misc_time = 0
+            while True:
                 observation, info = env.reset()
                 traj = []
                 obs_buf_ep = []
@@ -294,26 +298,39 @@ def env_run(env_id, args, env_fn, conn, local_episodes_per_epoch):
                 logp_buf_ep = []
                 num_steps = 0
                 while True:
-                    action, val, logp = ac.step(torch.as_tensor(observation, dtype=torch.float32, device=args.device))
+                    ac_step_time = time.time()
+                    action, val, logp = ac.step(torch.as_tensor(observation, dtype=torch.float32, device=torch.device('cpu')))
+                    ac_step_time = time.time() - ac_step_time
+                    total_ac_step_time += ac_step_time
 
+                    misc_time = time.time()
                     obs_buf_ep.append(np.expand_dims(observation, axis=0))
                     act_buf_ep.append(np.expand_dims(action, axis=0))
                     logp_buf_ep.append(logp)
                     val_buf_ep.append(val)
                     
-                    newlogp = ac.pi(torch.as_tensor(observation, dtype=torch.float32, device=args.device), torch.as_tensor(action, dtype=torch.float32, device=args.device))[1]
+                    newlogp = ac.pi(torch.as_tensor(observation, dtype=torch.float32, device=torch.device('cpu')), torch.as_tensor(action, dtype=torch.float32, device=torch.device('cpu')))[1]
                     approx_kl = (torch.tensor(logp) - newlogp).mean().item()
                     # print(f"approx_kl={approx_kl}")
                     assert np.isclose(approx_kl, 0), f"kl is large kl={approx_kl}"
                     assert torch.isclose(newlogp, torch.tensor(logp)), f"logp={logp}, newlogp={newlogp}"
+                    misc_time = time.time() - misc_time
 
+                    env_step_start = time.time()
                     observation, reward, terminated, truncated, info = env.step(action)
+                    env_step_time = time.time() - env_step_start
+                    total_env_step_time += env_step_time
 
+                    misc_time2 = time.time()
                     rews_buf_ep.append(reward)
                     
                     num_steps += 1
-                    
+                    misc_time2 = time.time() - misc_time2
+
+                    total_misc_time += misc_time + misc_time2
+
                     if terminated or truncated or num_steps > max_ep_len:
+                        misc_time3 = time.time()
                         obs_buf_ep = np.concatenate(obs_buf_ep, axis=0)
                         act_buf_ep = np.concatenate(act_buf_ep, axis=0)
                         
@@ -337,8 +354,14 @@ def env_run(env_id, args, env_fn, conn, local_episodes_per_epoch):
                         logp_buf.append(logp_buf_ep)
                         adv_buf.append(adv_buf_ep)
                         ret_buf.append(ret_buf_ep)
+                        misc_time3 = time.time() - misc_time3
+                        total_misc_time += misc_time3
                         break
-            
+                total_steps += num_steps
+                if total_steps > local_steps_per_epoch:
+                    break
+
+            collate_time = time.time()
             buf = {}
             buf['obs'] = np.concatenate(obs_buf, axis=0)
             buf['act'] = np.concatenate(act_buf, axis=0)
@@ -351,13 +374,15 @@ def env_run(env_id, args, env_fn, conn, local_episodes_per_epoch):
             buf['ep_len'] = np.array([len(rews_buf_ep) for rews_buf_ep in rews_buf])
             buf['rews_mean'] = np.array([np.mean(rews_buf_ep) for rews_buf_ep in rews_buf])
             data.data = buf
+            collate_time = time.time() - collate_time
+            print(f"env step time={total_env_step_time}, ac step time={total_ac_step_time}, misc time={total_misc_time}, collate time={collate_time}")
             conn.send(data)
         
         elif data.command == 'get_dims':
             data.data = {"obs_dim": env.get_observation().shape[0], "act_dim": env.get_action_dim()}
             conn.send(data)
         elif data.command in ['save_gif', 'eval']:
-            ac, episodes = data.data
+            ac, steps = data.data
             if data.command == 'save_gif':
                 o, info = env.reset()
             else:
@@ -368,7 +393,7 @@ def env_run(env_id, args, env_fn, conn, local_episodes_per_epoch):
             if not os.path.isdir(dir_):
                 os.mkdir(dir_)
 
-            path = f'{dir_}/episodes_{episodes}.gif'
+            path = f'{dir_}/steps_{steps}.gif'
             num_steps = 0
             while True:
                 num_steps += 1
@@ -407,8 +432,8 @@ if __name__ == '__main__':
     wandb.define_metric("pi/*", step_metric="pi/step")
     wandb.define_metric("v/step")
     wandb.define_metric("v/*", step_metric="v/step")
-    wandb.define_metric("reward/episodes")
-    wandb.define_metric("reward/*", step_metric="reward/episodes")
+    wandb.define_metric("reward/steps")
+    wandb.define_metric("reward/*", step_metric="reward/steps")
     
     experiment_dir = pathlib.Path(args.experiment_dir)
     args.bvh_path = list(experiment_dir.glob("*.bvh"))[0].as_posix()
@@ -421,7 +446,7 @@ if __name__ == '__main__':
     def env_fn(name):
         def fn(bvh_path):
             if name == "bullet":
-                return BulletDeepmimicEnv(bvh_path, motion_start=start, motion_end=end, add_scene=(args.do == "eval"))
+                return BulletDeepmimicEnv(bvh_path, motion_start=start, motion_end=end, add_scene=False)
             else:
                 return WalkerEnvHabitat(sim_settings, bvh_path, motion_start=start, motion_end=end)
         return fn

@@ -52,7 +52,7 @@ class WalkerEnvHabitat():
             motion_start=None, 
             motion_end=None,
             motion_stepper=0,
-            fps=1/0.0041, 
+            fps=1/0.001, 
             frameskip=4,
             urdf_path="CIRCLE_assets/subjects/amass.urdf", #"human.urdf", #"/Users/rishi/Documents/Academics/stanford/contextual-character-animation/bullet3/data/quadruped/quadruped.urdf" #"/Users/rishi/Documents/Academics/stanford/contextual-character-animation/bullet3/data/humanoid/nao.urdf" #"CIRCLE_assets/subjects/1_agent.urdf"
             ref_urdf_path="CIRCLE_assets/subjects/amass.urdf" #"/Users/rishi/Documents/Academics/stanford/contextual-character-animation/bullet3/data/quadruped/quadruped.urdf" #"/Users/rishi/Documents/Academics/stanford/contextual-character-animation/bullet3/data/humanoid/nao.urdf" #"CIRCLE_assets/subjects/1_agent.urdf"
@@ -178,7 +178,7 @@ class WalkerEnvHabitat():
             self.agent_model = None
 
         self.agent_model = self.art_obj_mgr.add_articulated_object_from_urdf(
-            filepath=self.urdf_path, fixed_base=False
+            filepath=self.urdf_path, fixed_base=True
         )
 
         assert self.agent_model.is_alive
@@ -209,14 +209,22 @@ class WalkerEnvHabitat():
         self._next_ref_pose()
         posbefore = np.array(self.agent_model.translation)[2]
         
-        self.update_pd_targets()
+        def to_pose(action):
+            pose = np.array([R.from_rotvec(a).as_quat() for a in action.reshape(-1,3)]).flatten()
+            return pose
 
-        if action is not None:
-            scaled_action = np.clip(10 * action, -15, 15)
-            self.agent_model.add_joint_forces(scaled_action)
+        self.update_pd_targets(to_pose(action))
+
+        # if action is not None:
+        #     scaled_action = np.clip(30 * action, -50, 50)
+        # else:
+        #     scaled_action = np.zeros(len(self.agent_model.joint_forces))
 
         for _ in range(self.frameskip):
+            # self.agent_model.add_joint_forces(scaled_action)
+            # print(f"action={scaled_action}, joint_forces={self.agent_model.joint_forces}")
             self.sim.step_world()
+            # print(f"action={scaled_action}, joint_forces={self.agent_model.joint_forces}")
         
         sim_data = self.get_observation(type_="dict")
         ref_data = self.get_observation(handle=self.ref_model, type_="dict")
@@ -241,7 +249,7 @@ class WalkerEnvHabitat():
         obs = self.get_observation()        
         terminated = False
         
-        if reward < 0.1 or (self.motion_stepper+1) * self.frameskip / self.fps > len(self.motion.poses) / self.motion.fps:
+        if reward < 0.0 or (self.motion_stepper+1) * self.frameskip / self.fps > len(self.motion.poses) / self.motion.fps:
             terminated = True
         # print(f"reward={reward}, terminated={terminated}")
         return obs, reward, terminated, False, {"diff": diff}
@@ -256,15 +264,16 @@ class WalkerEnvHabitat():
             if joint_type == phy.JointType.Fixed:
                 continue
             elif joint_type == phy.JointType.Spherical:
-                self.pd_joint_motors.append(model.create_joint_motor(model_link_id, phy.JointMotorSettings(mn.Quaternion(new_pose[count:count+3], new_pose[count+3]), 2, mn.Vector3(0,0,0), 0.1, 100)))
+                self.pd_joint_motors.append(model.create_joint_motor(model_link_id, phy.JointMotorSettings(mn.Quaternion(new_pose[count:count+3], new_pose[count+3]), 1, mn.Vector3(0,0,0), 0.1, 1000)))
                 count += 4
             elif joint_type == phy.JointType.Revolute:
                 raise NotImplementedError()
     
-    def update_pd_targets(self):
-        new_pose, new_pose_T, new_root_translate, new_root_rotation = self.get_ref_pose()
+    def update_pd_targets(self, tgt_pose=None):
+        if tgt_pose is None:
+            tgt_pose, new_pose_T, new_root_translate, new_root_rotation = self.get_ref_pose()
         model = self.agent_model
-        model.update_all_motor_targets(new_pose)
+        model.update_all_motor_targets(tgt_pose)
         
     def _next_ref_pose(self):
         self.set_pose(self.ref_model, ref=True)
@@ -282,20 +291,22 @@ class WalkerEnvHabitat():
         
         data = handle.joint_positions
         jposes = [baseOrn] + [data[x:x+4] for x in range(0, len(data), 4)]
+        pose += data
         data = handle.joint_velocities
+        vel += data
         jvels = [baseLinVel, baseAngVel] + [data[x:x+3] for x in range(0, len(data), 3)]
 
         basePos = tuple(np.array(basePos) - np.array(self.ref_offset)) if handle == self.ref_model else basePos
         if type_ == "array":
-            return np.concatenate([list(handle.rotation.vector) + [handle.rotation.scalar], handle.joint_positions, handle.joint_velocities]).ravel()
+            return np.concatenate([pose, vel]).ravel()
         elif type_ == "dict":
             return {"basePos": np.array(basePos)[:2], "jpose": np.array(jposes), "jvel": np.array(jvels), "end": 0}
         else:
             raise NotImplementedError(f"type_={type_} not found")
     
-    def reset(self):
+    def reset(self, start=None):
         max_steps = int(self.fps * len(self.motion.poses) / self.motion.fps / self.frameskip)
-        self.motion_stepper = np.random.randint(0, int(3*max_steps/4))
+        self.motion_stepper = start if start is not None else np.random.randint(0, int(3*max_steps/4))
 
         self._add_agent_model()
         self._add_ref_model()
@@ -465,7 +476,7 @@ if __name__ == '__main__':
     parser.add_argument(
         "--experiment_dir",
         type=str,
-        default="data/bvh2",
+        default="data/bvh5",
         help="path to the folder with the bvh, urdf, and vr_data.json files",
     )
 
@@ -481,28 +492,28 @@ if __name__ == '__main__':
     start, end = vr_data["bvh_trim_indices"]
 
     sim_settings = default_sim_settings
-    sim_settings["scene"] = "NONE"
-    sim_settings.pop("scene_dataset_config_file")
+    # sim_settings["scene"] = "NONE"
+    # sim_settings.pop("scene_dataset_config_file")
     # sim_settings["scene_dataset_config_file"] = "default"
     env = WalkerEnvHabitat(sim_settings, bvh_path, motion_start=start, motion_end=end)
-    o, info = env.reset()
+    o, info = env.reset(0)
     frames = [env.render()]
-    dir_ = f'gifs-habitat-sim'
+    dir_ = f'gifs-habitat-sim-bvh1'
     
     if not os.path.isdir(dir_):
         os.mkdir(dir_)
 
     path = f'{dir_}/test2.gif'
     start_sim = time.time()
-    for _ in range(300): # env.ref_episode_len
-        a = np.random.rand(len(env.agent_model.joint_forces))
-        for _ in range(1):
-            o, r, terminated, truncated, info = env.step(a)
-        frames.append(env.render())
-        if terminated:
-            break
+    # for _ in range(3): # env.ref_episode_len
+    #     a = np.random.rand(len(env.agent_model.joint_forces))
+    #     for _ in range(1):
+    #         o, r, terminated, truncated, info = env.step(a)
+    #     frames.append(env.render())
+    #     if terminated:
+    #         break
     print(f"sim time={time.time() - start_sim}")
-    imageio.imwrite(f"{dir_}/img.png", frames[0])
+    imageio.imwrite(f"{dir_}/bvh5.png", frames[0])
     imageio.mimsave(path, frames)
 
     # o, info = env.reset()
